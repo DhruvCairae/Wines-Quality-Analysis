@@ -1,0 +1,403 @@
+---
+title: "Wine Quality"
+output: word_document
+---
+
+# Library Imports
+
+```{r, message=FALSE, warning=FALSE}
+options(warn = -1)
+pkgs <- c("dplyr", "tidyverse", "lubridate", "data.table", "ggplot2","knitr","skimr","corrplot","ROCR","rms","pdp")
+lib <- installed.packages()[, "Package"]
+install.packages(setdiff(pkgs, lib))
+library(tidyverse)  # Data manipulation and visualization
+library(skimr)  # Dataset summarization
+library(corrplot)  # Correlation visualization
+library(ROCR)  # For ROC curves
+library(rms)  # For calibration curves
+library(pdp)  # For partial dependence plots
+```
+
+# Question 1
+
+The data pertains to the paper - Modeling wine preferences by data mining from physicochemical properties, 2009. The publication adopted a data mining approach to predict human wine taste preferences that is based on easily available from analytical tests at the certification step. The dataset comprises of 6497 observations across 13 variables. Once filtered for red wine only, there are 1599 observations with 12 variables, since the variable of wine type, red or white is now redundant. Quality of wine is on a ordinal scale from one to eight, although minimum value is three in the remaining data.
+
+```{r, message=FALSE,warning=FALSE}
+# Import wine dataset
+file <- read.csv('C:\\Users\\nawal\\OneDrive\\Documents\\Course Material\\Stat Modelling\\wine.csv')
+
+file %>% 
+  # Subset the red wines from the data
+  filter(type == 'red') %>% 
+  # Remove the redundant type variable
+  select(-type) -> wine_red
+
+# Create a second dataset where quality is a factor variable
+wine_red %>% mutate(quality = as.factor(quality)) -> wine
+```
+
+## Response Variable Distribution
+
+Most of the wines fall in the bracket of 5-6 on the quality scale. Very few are below five and fewer above 7. Driven in all likelihood by market considerations as higher quality entails higher price. 
+
+```{r, message=FALSE,warning=FALSE}
+# Quality frequency plot
+ggplot(wine, aes(x = quality)) + 
+  geom_bar(fill = 'blue') +
+  theme_minimal() +
+  labs(x = "Quality", y = "Count")
+```
+
+## Modeling Recommendation
+
+As the response variable is ordinal, ordinal regression makes the most sense for modeling. Linear regression could also be explored as reasonable linear relationships exist between quality and the predictor variables.
+
+# Question 2
+
+## Summary Statistics
+
+```{r,message=FALSE,warning=FALSE}
+# Summarize the structure of the dataset
+skim(wine)
+```
+
+## Correlation Analysis
+
+As evident from the plot below, quality is most strongly positively correlated with alcohol and sulphates, relatively speaking and moderately negatively correlated with volatility of acidity. 
+
+```{r, message=FALSE,warning=FALSE}
+# Find the correlations between quality and other variables
+res <- cor(wine_red)
+cor.vis <- round(res, 2)
+
+# Display a correlation plot for the red wine data
+corrplot(cor(wine_red),
+         method = "number",
+         type = "upper" # show only upper side
+)
+```
+
+
+## Analysis of Variables of Interest 
+
+Nearly a third of wines have alcohol content below ten. This seems consistent with distribution of quality and correlation of alcohol with quality although the divide is not very sharp.
+
+```{r, message=FALSE,warning=FALSE}
+# Alcohol histogram
+ggplot(wine_red, aes(x = alcohol)) + 
+  geom_histogram(fill = 'navy', bins = 10) +
+  theme_minimal() +
+  labs(x = "Alcohol", y = "Count")
+```
+
+###### Sulphate distribution is nearly entirely concentrated between 0.5 and 0.8.
+
+```{r, message=FALSE,warning=FALSE}
+# Sulphate histogram
+ggplot(wine, aes(x = sulphates )) + 
+  geom_histogram(fill = 'red', bins = 10) +
+  theme_minimal() +
+  labs(x = "sulphates ", y = "Count")
+```
+
+##### Compared to other variables, volatile acidity is more evenly distributed as opposed to obvious concentrations in the other two variables.
+
+```{r, message=FALSE,warning=FALSE}
+# Volatile acidity histogram
+ggplot(wine, aes(x = volatile.acidity  )) + 
+  geom_histogram(fill = 'green', bins = 10) +
+  theme_minimal() +
+  labs(x = "volatile.acidity  ", y = "Count")
+```
+
+# Question 3
+
+## Logistic Regression Modeling
+
+```{r, message=FALSE, warning=FALSE}
+# Add a binary response variable for quality
+wine_red %>% mutate(Y = if_else(quality < 7, 0, 1)) -> wine_red
+
+# Fit a logistic regression on Y, removing quality because Y is derived from it.
+model_logistic <- glm(Y ~ . - quality, family = binomial, data = wine_red)
+
+summary(model_logistic)
+```
+
+The residual deviance is less than the degrees of freedom. This could indicate overdispersion. However, this may be unavoidable considering that the null model also had a residual deviance less than the degrees of freedom.
+
+## ROC Curve and AUC
+
+```{r, message=FALSE, warning=FALSE}
+# Predict the Y class for each observation
+model_logistic_prob <- predict(model_logistic, type = "response")
+
+# Generate a prediction object for the model
+model_logistic_pred <- prediction(model_logistic_prob, wine_red$Y)
+
+# Generate a performance object for the model
+model_logistic_perf <- performance(model_logistic_pred, "tpr", "fpr")
+
+# Plot the ROC curve for the logistic model
+plot(model_logistic_perf, colorize = TRUE, main = "Logistic Model ROC Curve")
+
+# Let's generate a confusion matrix using pcut = 0.5
+class_predictions <- ifelse(model_logistic_prob > 0.5, 1, 0)
+
+table("Truth" = wine_red$Y, "Predicted" = class_predictions)
+```
+
+The ROC Curve is well above the 45 degree line where the false positives outnumber the true negatives. AUC is `r round(unlist(slot(performance(model_logistic_pred, "auc"), "y.values")), 2)` for the logistic regression model. This implies that the logistic model has good discriminatory power.
+
+## Model Calibration Assessment
+
+```{r, warning=FALSE, message=FALSE}
+# Generate a calibration curve
+val.prob(model_logistic_prob, wine_red$Y)
+```
+
+At low predicted probabilities, our logistic model appears to follow the ideal line well. However, it deviates from the ideal line for predicted probabilities above about 0.6. At these higher predicted probabilities, the actual probability is consistently lower than the predicted probability. Our logistic model is prone to predicting more high quality wines than is warranted. This indicates that the model is well calibrated for wines that are unlikely to be high quality but poorly calibrated for wines that are likely to be high quality.
+
+# Question 4
+
+## Y vs. alcohol Effect Plot
+
+```{r, message=FALSE, warning=FALSE}
+# Draw the effect plot
+partial(model_logistic,
+        pred.var = "alcohol",
+        prob = TRUE,
+        plot = TRUE,
+        rug = TRUE,
+        plot.engine = "ggplot2",
+        train = wine_red)
+```
+
+This plot appears to be nonlinear. It is not surprising that this is the case. Logistic models are of the form log($\frac {p}{1 - p}$) = $\eta$ = $\beta_0$ + $\beta_1$\*$X_1$ + ... + $\beta_p$\*$X_p$. This means that $p = \frac {e^\eta}{1 + e^\eta}$. In a partial dependence plot, only a single variable is considered. If $\beta_{alcohol}$ is positive, this would result in a rising curve that levels off at 1 for high values of $X_{alcohol}$. Apparently, none of the alcohol values were large enough to reach this horizontal asymptote.
+
+Note that there are more observations at lower alcohol values than at high ones. It appears that the logistic model is extrapolating beyond about 11 to 12 units of alcohol and less than 9. Putting too much stock into the shape of the curve would be unwise, especially on the extreme ends.
+
+
+# Question 5
+
+## Discuss reasons why the modeling approach used in 3) is ill-advised for modeling these data
+
+Modeling approach 3, which converts an ordinal variable to binomial (0 or 1) based on a condition on wine quality is not advised because -
+1. The ordinality of response variable is lost, we can now only predict if the wine had a quality of below or above 7
+2. Looking at the distribution of response variable in the EDA, we see that there are not many records with wine quality > 7, thus, splitting the data would result in imbalanced dataset, which is difficult to predict
+3. There are many algorithms, that consider ordinality of the variable, such as ordinal regression which would be the best fit for modeling datasets like wine
+
+# Question 6
+
+## Fitting an ordinal model to the data with original quality as response.
+
+```{r, message=FALSE, warning=FALSE}
+# Removing the Y variable added earlier for logistic model
+wine_red <- wine_red[,-13] 
+
+# Fitting an ordinal model to the red wine data
+fit.orm <- orm(quality ~ ., data = wine_red) 
+fit.orm
+```
+## Partial Effect Plots 
+```{r, message=FALSE, warning=FALSE}
+pfun.orm <- function(object, newdata) {
+  colMeans(predict(object, newdata = newdata, type = "fitted"))
+}
+```
+
+### Fixed Acidity
+```{r, message=FALSE, warning=FALSE}
+
+# Fixed Acidity Effect Plot
+pd.fac <- partial(fit.orm, pred.var = "fixed.acidity", pred.fun = pfun.orm)
+ggplot(subset(pd.fac,yhat.id %in% "y>=7"), aes(x = fixed.acidity, y = yhat,linetype = yhat.id,color = yhat.id),colour = 'blue') +
+  geom_line(size = 2,color = 'blue') +
+  xlab("Fixed Acidity") +
+  ylab("Partial dependence") + theme_bw()
+
+```
+
+The cumulative probability that quality >= 7 increases by 0.24 as fixed acidity values increase from lowest to highest.
+
+### Volatile Acidity
+```{r, message=FALSE, warning=FALSE}
+
+# Volatile Acidity Effect Plot
+
+pd.vac <- partial(fit.orm, pred.var = "volatile.acidity", pred.fun = pfun.orm)
+ggplot(subset(pd.vac,yhat.id %in% "y>=7"), aes(x = volatile.acidity, y = yhat,linetype = yhat.id,color = yhat.id),colour = 'blue') +
+  geom_line(size = 2,color = 'blue') +
+  xlab("Volatile Acidity") +
+  ylab("Partial dependence")+ theme_bw()
+```
+
+The cumulative probability that quality >= 7 decreases by approximately 0.28 as volatile acidity values increases from minmum to maximum.
+
+### Citric Acid
+```{r, message=FALSE, warning=FALSE}
+
+# Citric Acid Effect Plot
+pd.ca <- partial(fit.orm, pred.var = "citric.acid", pred.fun = pfun.orm)
+ggplot(subset(pd.ca,yhat.id %in% "y>=7"), aes(x = citric.acid, y = yhat,linetype = yhat.id,color = yhat.id),colour = 'blue') +
+  geom_line(size = 2,color = 'blue') +
+  xlab("Citric Acid") +
+  ylab("Partial dependence")+ theme_bw()
+
+```
+
+The cumulative probability that quality >= 7  almost linearly decreases by approximately 0.16 as citric acid values vary from 0 to 1.
+
+### Residual Sugar
+```{r, message=FALSE, warning=FALSE}
+
+# Residual Sugar Effect Plot
+
+pd.rs <- partial(fit.orm, pred.var = "residual.sugar", pred.fun = pfun.orm)
+ggplot(subset(pd.rs,yhat.id %in% "y>=7"), aes(x =  residual.sugar , y = yhat,linetype = yhat.id,color = yhat.id),colour = 'blue') +
+  geom_line(size = 2,color = 'blue') +
+  xlab("Residual Sugar") +
+  ylab("Partial dependence")+ theme_bw()
+
+```
+The cumulative probability that quality >= 7 increases by approximately 0.15 as residual sugar values increase from minimum to maximum.
+
+### Chlorides
+```{r, message=FALSE, warning=FALSE}
+
+# Chlorides Effect Plot
+pd.ch <- partial(fit.orm, pred.var = "chlorides", pred.fun = pfun.orm)
+ggplot(subset(pd.ch,yhat.id %in% "y>=7"), aes(x =  chlorides , y = yhat,linetype = yhat.id,color = yhat.id),colour = 'blue') +
+  geom_line(size = 2,color = 'blue') +
+  xlab("Chlorides") +
+  ylab("Partial dependence")+ theme_bw()
+
+```
+
+The cumulative probability that quality >= 7 shows a non-linear decrease by approximately 0.17 as the presence of chlorides increases from minimum to maximum value.
+
+### Free Sulfur Dioxide
+```{r, message=FALSE, warning=FALSE}
+
+# Free Sulfur Dioxide Effect Plot
+pd.fsd <- partial(fit.orm, pred.var = "free.sulfur.dioxide", pred.fun = pfun.orm)
+ggplot(subset(pd.fsd,yhat.id %in% "y>=7"), aes(x =  free.sulfur.dioxide , y = yhat,linetype = yhat.id,color = yhat.id),colour = 'blue') +
+  geom_line(size = 2,color = 'blue') +
+  xlab("Free Sulfur Dioxide") +
+  ylab("Partial dependence")+ theme_bw()
+
+```
+
+The cumulative probability that quality >= 7 shows an almost linear increase by approximately 0.12 as the presence of free sulfur dioxide increases from minimum to maximum value.
+
+#### Total Sulfur Dioxide
+```{r, message=FALSE, warning=FALSE}
+
+# Total Sulfur Dioxide Effect Plot
+pd.tsd <- partial(fit.orm, pred.var = "total.sulfur.dioxide", pred.fun = pfun.orm)
+ggplot(subset(pd.tsd,yhat.id %in% "y>=7"), aes(x =  total.sulfur.dioxide , y = yhat,linetype = yhat.id,color = yhat.id),colour = 'blue') +
+  geom_line(size = 2,color = 'blue') +
+  xlab("Total Sulfur Dioxide") +
+  ylab("Partial dependence")+ theme_bw()
+
+```
+
+The cumulative probability that quality >= 7 follows a non-linear decrease by approximately 0.17 as the presence of total sulfur dioxide increases from minimum to maximum value.
+
+### Density
+```{r, message=FALSE, warning=FALSE}
+
+# Density Effect Plot
+pd.den <- partial(fit.orm, pred.var = "density", pred.fun = pfun.orm)
+ggplot(subset(pd.den,yhat.id %in% "y>=7"), aes(x =  density , y = yhat,linetype = yhat.id,color = yhat.id),colour = 'blue') +
+  geom_line(size = 2,color = 'blue') +
+  xlab("Density") +
+  ylab("Partial dependence")+ theme_bw()
+
+```
+
+The cumulative probability that quality >= 7 shows a nearly linear decrease by approximately 0.1 as density increases from minimum to maximum value.
+
+### pH
+```{r, message=FALSE, warning=FALSE}
+
+# pH Effect Plot
+pd.ph <- partial(fit.orm, pred.var = "pH", pred.fun = pfun.orm)
+ggplot(subset(pd.ph,yhat.id %in% "y>=7"), aes(x = pH , y = yhat,linetype = yhat.id,color = yhat.id),colour = 'blue') +
+  geom_line(size = 2,color = 'blue') +
+  xlab("pH") +
+  ylab("Partial dependence")+ theme_bw()
+
+```
+
+The cumulative probability that quality >= 7 decreases by approximately 0.09 as the pH increases to maximum value.
+
+### Sulphates
+```{r, message=FALSE, warning=FALSE}
+
+# Sulphates Effect Plot
+pd.sul <- partial(fit.orm, pred.var = "sulphates", pred.fun = pfun.orm)
+ggplot(subset(pd.sul,yhat.id %in% "y>=7"), aes(x = sulphates , y = yhat,linetype = yhat.id,color = yhat.id),colour = 'blue') +
+  geom_line(size = 2,color = 'blue') +
+  xlab("Sulphates") +
+  ylab("Partial dependence")+ theme_bw()
+
+```
+
+The cumulative probability that quality >= 7 shows a non-linear increase by approximately 0.6 as the presence of sulphates increases from lowest to highest value.
+
+### Alcohol
+```{r, message=FALSE, warning=FALSE}
+
+# Alcohol Effect Plot
+pd.alc <- partial(fit.orm, pred.var = "alcohol", pred.fun = pfun.orm)
+ggplot(subset(pd.alc,yhat.id %in% "y>=7"), aes(x = alcohol, y = yhat, linetype = yhat.id, color = yhat.id)) +
+  geom_line(size = 2,color = 'blue') +
+  xlab("Alcohol") +
+  ylab("Partial dependence")+ theme_bw()
+
+```
+The cumulative probability that quality >= 7 increases by approximately 0.7 as the presence of alcohol increases from minimum to maximum value. The increase is steeper for alcohol content greater than 12.
+
+## Top Predictors
+
+Based on the highest observed relative change in the cumulative probability that quality of the wine is greater 7, we can conclude that alcohol,sulphates and volatile acidity are the top predictors of quality.
+
+# Question 7
+
+Red Wine Sample Details are as follows:  
+- fixed.acidity 7.3000  
+- volatile.acidity 0.6500  
+- citric.acid 0.0000  
+- residual.sugar 1.2000  
+- chlorides 0.0650  
+- free.sulfur.dioxide 15.0000  
+- total.sulfur.dioxide 21.0000  
+- density 0.9946  
+- pH 3.3900  
+- sulphates 0.4700  
+- alcohol 10.0000  
+Based on the above characteristics, we try to predict the quality of wine sample using our ordinal model from the previous step.
+
+```{r, message=FALSE, warning=FALSE}
+# Estimating Cumulative Probabilities of Quality Scores 
+pred_quality = predict(fit.orm,data.frame(fixed.acidity=7.30, volatile.acidity=0.65, citric.acid= 0.0,residual.sugar=1.2, chlorides=0.065, free.sulfur.dioxide=15, total.sulfur.dioxide= 21, density=0.9946, pH=3.39, sulphates =0.47, alcohol=10.0), type="fitted")
+
+pred_quality
+```
+
+The probabilities *Pr(quality == 7|x0)* is `r pred_quality[4] - pred_quality[5]` and *Pr(quality >= 7|x0)* is `r pred_quality[4]`. 
+
+The probability of quality being predicted as 9 or above for a red wine sample is essentially zero, since the training data for the model did not include red wine samples with a quality score greater than 8.
+
+# Question 8
+
+To predict the quality of white wine using the model we created for red wine is not advisable.The top predictors which we obtained to determine the quality of red wine would not be same as for the white wine. The composition of attribute need to judge the quality of wine will not be same for white wine so using the same model won't make sense in calculating the log -odds of quality for the white wine. Instead building a separate model for the white wine and coming up with quality attributes would be the better idea.
+
+
+
+
+
+
+
+
